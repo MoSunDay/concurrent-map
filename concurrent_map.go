@@ -1,15 +1,17 @@
 package cmap
 
 import (
-	"encoding/json"
 	"sync"
 )
 
-var SHARD_COUNT = 32
+// var m.ShardsNumber = 32
 
 // A "thread" safe map of type string:Anything.
-// To avoid lock bottlenecks this map is dived to several (SHARD_COUNT) map shards.
-type ConcurrentMap []*ConcurrentMapShared
+// To avoid lock bottlenecks this map is dived to several (m.ShardsNumber) map shards.
+type ConcurrentMap struct {
+	ShardsMembers []*ConcurrentMapShared
+	ShardsNumber  int
+}
 
 // A "thread" safe string to anything map.
 type ConcurrentMapShared struct {
@@ -18,17 +20,20 @@ type ConcurrentMapShared struct {
 }
 
 // Creates a new concurrent map.
-func New() ConcurrentMap {
-	m := make(ConcurrentMap, SHARD_COUNT)
-	for i := 0; i < SHARD_COUNT; i++ {
-		m[i] = &ConcurrentMapShared{items: make(map[string]interface{})}
+func New(sharedCount int) *ConcurrentMap {
+	m := new(ConcurrentMap)
+	m.ShardsNumber = sharedCount
+	m.ShardsMembers = make([]*ConcurrentMapShared, sharedCount)
+
+	for i := 0; i < sharedCount; i++ {
+		m.ShardsMembers[i] = &ConcurrentMapShared{items: make(map[string]interface{})}
 	}
 	return m
 }
 
 // GetShard returns shard under given key
 func (m ConcurrentMap) GetShard(key string) *ConcurrentMapShared {
-	return m[uint(fnv32(key))%uint(SHARD_COUNT)]
+	return m.ShardsMembers[uint(fnv32(key))%uint(m.ShardsNumber)]
 }
 
 func (m ConcurrentMap) MSet(data map[string]interface{}) {
@@ -93,8 +98,8 @@ func (m ConcurrentMap) Get(key string) (interface{}, bool) {
 // Count returns the number of elements within the map.
 func (m ConcurrentMap) Count() int {
 	count := 0
-	for i := 0; i < SHARD_COUNT; i++ {
-		shard := m[i]
+	for i := 0; i < m.ShardsNumber; i++ {
+		shard := m.ShardsMembers[i]
 		shard.RLock()
 		count += len(shard.items)
 		shard.RUnlock()
@@ -191,11 +196,11 @@ func (m ConcurrentMap) IterBuffered() <-chan Tuple {
 // It returns once the size of each buffered channel is determined,
 // before all the channels are populated using goroutines.
 func snapshot(m ConcurrentMap) (chans []chan Tuple) {
-	chans = make([]chan Tuple, SHARD_COUNT)
+	chans = make([]chan Tuple, m.ShardsNumber)
 	wg := sync.WaitGroup{}
-	wg.Add(SHARD_COUNT)
+	wg.Add(m.ShardsNumber)
 	// Foreach shard.
-	for index, shard := range m {
+	for index, shard := range m.ShardsMembers {
 		go func(index int, shard *ConcurrentMapShared) {
 			// Foreach key, value pair.
 			shard.RLock()
@@ -249,8 +254,8 @@ type IterCb func(key string, v interface{})
 // Callback based iterator, cheapest way to read
 // all elements in a map.
 func (m ConcurrentMap) IterCb(fn IterCb) {
-	for idx := range m {
-		shard := (m)[idx]
+	for idx := range m.ShardsMembers {
+		shard := (m.ShardsMembers)[idx]
 		shard.RLock()
 		for key, value := range shard.items {
 			fn(key, value)
@@ -266,8 +271,8 @@ func (m ConcurrentMap) Keys() []string {
 	go func() {
 		// Foreach shard.
 		wg := sync.WaitGroup{}
-		wg.Add(SHARD_COUNT)
-		for _, shard := range m {
+		wg.Add(m.ShardsNumber)
+		for _, shard := range m.ShardsMembers {
 			go func(shard *ConcurrentMapShared) {
 				// Foreach key, value pair.
 				shard.RLock()
@@ -290,18 +295,6 @@ func (m ConcurrentMap) Keys() []string {
 	return keys
 }
 
-//Reviles ConcurrentMap "private" variables to json marshal.
-func (m ConcurrentMap) MarshalJSON() ([]byte, error) {
-	// Create a temporary map, which will hold all item spread across shards.
-	tmp := make(map[string]interface{})
-
-	// Insert items to temporary map.
-	for item := range m.IterBuffered() {
-		tmp[item.Key] = item.Val
-	}
-	return json.Marshal(tmp)
-}
-
 func fnv32(key string) uint32 {
 	hash := uint32(2166136261)
 	const prime32 = uint32(16777619)
@@ -311,25 +304,3 @@ func fnv32(key string) uint32 {
 	}
 	return hash
 }
-
-// Concurrent map uses Interface{} as its value, therefor JSON Unmarshal
-// will probably won't know which to type to unmarshal into, in such case
-// we'll end up with a value of type map[string]interface{}, In most cases this isn't
-// out value type, this is why we've decided to remove this functionality.
-
-// func (m *ConcurrentMap) UnmarshalJSON(b []byte) (err error) {
-// 	// Reverse process of Marshal.
-
-// 	tmp := make(map[string]interface{})
-
-// 	// Unmarshal into a single map.
-// 	if err := json.Unmarshal(b, &tmp); err != nil {
-// 		return nil
-// 	}
-
-// 	// foreach key,value pair in temporary map insert into our concurrent map.
-// 	for key, val := range tmp {
-// 		m.Set(key, val)
-// 	}
-// 	return nil
-// }
